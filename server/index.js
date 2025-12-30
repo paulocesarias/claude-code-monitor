@@ -292,7 +292,7 @@ async function getSessionDetails(sessionId) {
         const entries = await parseJsonlFile(filePath);
         const todos = await getTodosForSession(sessionId);
 
-        // Get messages with full content
+        // Get messages with full content, sorted by timestamp
         const messages = entries
           .filter(e => e.type === 'user' || e.type === 'assistant')
           .map(e => ({
@@ -300,7 +300,12 @@ async function getSessionDetails(sessionId) {
             timestamp: e.timestamp,
             content: e.message?.content,
             model: e.message?.model
-          }));
+          }))
+          .sort((a, b) => {
+            const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+            const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+            return timeA - timeB; // Oldest first, so slice(-10) gets most recent
+          });
 
         return {
           id: sessionId,

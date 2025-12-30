@@ -190,7 +190,7 @@ function SessionDetails({ session }) {
           <p className="text-slate-500 text-sm">No messages</p>
         ) : (
           <div className="space-y-3 max-h-96 overflow-y-auto scrollbar-thin">
-            {session.messages.slice(-10).map((msg, index) => (
+            {session.messages.slice(-10).reverse().map((msg, index) => (
               <div
                 key={index}
                 className={`p-3 rounded-lg ${
