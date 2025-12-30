@@ -6,8 +6,7 @@ After=network.target
 Type=simple
 User=paulo
 WorkingDirectory=/home/paulo/Github/claude-code-monitor
-Environment=NODE_ENV=production
-Environment=PORT=3001
+EnvironmentFile=/home/paulo/Github/claude-code-monitor/.env
 ExecStart=/usr/bin/node server/index.js
 Restart=on-failure
 RestartSec=10

@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import Login from './components/Login';
 import Dashboard from './components/Dashboard';
 import SessionList from './components/SessionList';
 import SessionDetails from './components/SessionDetails';
@@ -8,7 +10,8 @@ const SOCKET_URL = import.meta.env.PROD
   ? window.location.origin
   : 'http://localhost:3001';
 
-function App() {
+function MonitorApp() {
+  const { user, logout } = useAuth();
   const [sessions, setSessions] = useState([]);
   const [stats, setStats] = useState(null);
   const [selectedSession, setSelectedSession] = useState(null);
@@ -20,12 +23,19 @@ function App() {
     fetchSessions();
     fetchStats();
 
-    // Setup Socket.IO connection
-    const socket = io(SOCKET_URL);
+    // Setup Socket.IO connection with credentials
+    const socket = io(SOCKET_URL, {
+      withCredentials: true
+    });
 
     socket.on('connect', () => {
       setConnected(true);
       console.log('Connected to server');
+    });
+
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error.message);
+      setConnected(false);
     });
 
     socket.on('disconnect', () => {
@@ -74,9 +84,11 @@ function App() {
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch('/api/sessions');
-      const data = await res.json();
-      setSessions(data);
+      const res = await fetch('/api/sessions', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data);
+      }
     } catch (error) {
       console.error('Error fetching sessions:', error);
     } finally {
@@ -86,9 +98,11 @@ function App() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/stats');
-      const data = await res.json();
-      setStats(data);
+      const res = await fetch('/api/stats', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setStats(data);
+      }
     } catch (error) {
       console.error('Error fetching stats:', error);
     }
@@ -96,12 +110,18 @@ function App() {
 
   const handleSelectSession = async (sessionId) => {
     try {
-      const res = await fetch(`/api/sessions/${sessionId}`);
-      const data = await res.json();
-      setSelectedSession(data);
+      const res = await fetch(`/api/sessions/${sessionId}`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setSelectedSession(data);
+      }
     } catch (error) {
       console.error('Error fetching session details:', error);
     }
+  };
+
+  const handleLogout = async () => {
+    await logout();
   };
 
   return (
@@ -120,11 +140,31 @@ function App() {
               <p className="text-sm text-slate-400">Real-time agent activity dashboard</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500 animate-pulse-dot' : 'bg-red-500'}`}></span>
-            <span className="text-sm text-slate-400">
-              {connected ? 'Connected' : 'Disconnected'}
-            </span>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500 animate-pulse-dot' : 'bg-red-500'}`}></span>
+              <span className="text-sm text-slate-400">
+                {connected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+            {user && (
+              <div className="flex items-center gap-3 pl-4 border-l border-slate-700">
+                {user.picture && (
+                  <img
+                    src={user.picture}
+                    alt={user.name}
+                    className="w-8 h-8 rounded-full"
+                  />
+                )}
+                <span className="text-sm text-slate-300">{user.name || user.email}</span>
+                <button
+                  onClick={handleLogout}
+                  className="text-sm text-slate-400 hover:text-white transition-colors"
+                >
+                  Logout
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -160,6 +200,32 @@ function App() {
         )}
       </main>
     </div>
+  );
+}
+
+function AppContent() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-orange-500"></div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login />;
+  }
+
+  return <MonitorApp />;
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
 

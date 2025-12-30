@@ -2,6 +2,9 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import { watch } from 'chokidar';
 import { readdir, readFile, stat } from 'fs/promises';
 import { join, dirname } from 'path';
@@ -18,17 +21,96 @@ const CLAUDE_DIR = process.env.CLAUDE_DIR || join(process.env.HOME, '.claude');
 const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
 const TODOS_DIR = join(CLAUDE_DIR, 'todos');
 
+// Auth configuration
+const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || '').split(',').filter(Boolean);
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
 // CORS setup
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? ['https://claude.headbangtech.cloud', 'http://claude.headbangtech.cloud']
+  : ['http://localhost:5173', 'http://localhost:3000'];
+
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? ['https://claude.headbangtech.com', 'http://claude.headbangtech.com']
-    : ['http://localhost:5173', 'http://localhost:3000'],
+  origin: allowedOrigins,
   credentials: true
 }));
 
 app.use(express.json());
+app.use(cookieParser());
 
-// Serve static files in production
+// Auth middleware
+const requireAuth = (req, res, next) => {
+  const token = req.cookies.auth_token;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+};
+
+// Auth routes
+app.post('/api/auth/google', async (req, res) => {
+  const { credential } = req.body;
+
+  if (!credential) {
+    return res.status(400).json({ error: 'No credential provided' });
+  }
+
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: GOOGLE_CLIENT_ID
+    });
+
+    const payload = ticket.getPayload();
+    const { email, name, picture, sub: googleId } = payload;
+
+    // Check if email is allowed
+    if (ALLOWED_EMAILS.length > 0 && !ALLOWED_EMAILS.includes(email)) {
+      return res.status(403).json({ error: 'Access denied. Email not authorized.' });
+    }
+
+    // Create JWT token
+    const token = jwt.sign(
+      { email, name, picture, googleId },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Set HTTP-only cookie
+    res.cookie('auth_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    });
+
+    res.json({ user: { email, name, picture } });
+  } catch (error) {
+    console.error('Google auth error:', error);
+    res.status(401).json({ error: 'Invalid Google token' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('auth_token');
+  res.json({ success: true });
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+// Serve static files in production (before auth middleware for assets)
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(join(__dirname, '../dist')));
 }
@@ -36,10 +118,29 @@ if (process.env.NODE_ENV === 'production') {
 // Socket.IO setup
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.NODE_ENV === 'production'
-      ? ['https://claude.headbangtech.com', 'http://claude.headbangtech.com']
-      : ['http://localhost:5173', 'http://localhost:3000'],
-    methods: ['GET', 'POST']
+    origin: allowedOrigins,
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
+// Socket.IO auth middleware
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token ||
+    socket.handshake.headers.cookie?.split(';')
+      .find(c => c.trim().startsWith('auth_token='))
+      ?.split('=')[1];
+
+  if (!token) {
+    return next(new Error('Authentication required'));
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    socket.user = decoded;
+    next();
+  } catch (error) {
+    next(new Error('Invalid token'));
   }
 });
 
@@ -217,8 +318,8 @@ async function getSessionDetails(sessionId) {
   return null;
 }
 
-// API Routes
-app.get('/api/sessions', async (req, res) => {
+// Protected API Routes
+app.get('/api/sessions', requireAuth, async (req, res) => {
   try {
     const sessions = await getAllSessions();
     res.json(sessions);
@@ -227,7 +328,7 @@ app.get('/api/sessions', async (req, res) => {
   }
 });
 
-app.get('/api/sessions/:id', async (req, res) => {
+app.get('/api/sessions/:id', requireAuth, async (req, res) => {
   try {
     const session = await getSessionDetails(req.params.id);
     if (session) {
@@ -240,7 +341,7 @@ app.get('/api/sessions/:id', async (req, res) => {
   }
 });
 
-app.get('/api/stats', async (req, res) => {
+app.get('/api/stats', requireAuth, async (req, res) => {
   try {
     const sessions = await getAllSessions();
     const activeSessions = sessions.filter(s => s.isActive);
@@ -268,7 +369,7 @@ if (process.env.NODE_ENV === 'production') {
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+  console.log('Client connected:', socket.id, socket.user?.email);
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
@@ -326,4 +427,6 @@ httpServer.listen(PORT, () => {
   console.log(`Claude Code Monitor server running on port ${PORT}`);
   console.log(`Watching: ${PROJECTS_DIR}`);
   console.log(`Watching: ${TODOS_DIR}`);
+  console.log(`Google Auth: ${GOOGLE_CLIENT_ID ? 'Configured' : 'NOT CONFIGURED'}`);
+  console.log(`Allowed emails: ${ALLOWED_EMAILS.length > 0 ? ALLOWED_EMAILS.join(', ') : 'All (no restriction)'}`);
 });
