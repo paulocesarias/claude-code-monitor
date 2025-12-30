@@ -225,7 +225,7 @@ async function getTodosForSession(sessionId) {
 
 // Helper: Get all sessions
 async function getAllSessions() {
-  const sessions = [];
+  const sessionsMap = new Map(); // Use Map to deduplicate by session ID
 
   try {
     const projectDirs = await readdir(PROJECTS_DIR);
@@ -247,15 +247,26 @@ async function getAllSessions() {
         // Skip empty files
         if (fileStat.size === 0) continue;
 
+        // Use file modification time for deduplication (faster than parsing)
+        const existingSession = sessionsMap.get(sessionId);
+        if (existingSession && existingSession.mtime >= fileStat.mtime) {
+          continue; // Skip if we already have a newer version
+        }
+
         const entries = await parseJsonlFile(filePath);
         if (entries.length === 0) continue;
+
+        // Skip warmup/internal agent sessions
+        if (isWarmupSession(entries)) continue;
 
         const sessionInfo = getSessionInfo(entries);
         const todos = await getTodosForSession(sessionId);
 
-        sessions.push({
+        sessionsMap.set(sessionId, {
           id: sessionId,
           project: projectDir,
+          filePath, // Store for getSessionDetails
+          mtime: fileStat.mtime,
           ...sessionInfo,
           todos,
           isActive: isSessionActive(sessionInfo.lastActivity)
@@ -266,7 +277,8 @@ async function getAllSessions() {
     console.error('Error getting sessions:', error);
   }
 
-  // Sort by last activity (most recent first)
+  // Convert map to array and sort by last activity (most recent first)
+  const sessions = Array.from(sessionsMap.values());
   return sessions.sort((a, b) =>
     new Date(b.lastActivity) - new Date(a.lastActivity)
   );
@@ -279,43 +291,68 @@ function isSessionActive(lastActivity) {
   return new Date(lastActivity).getTime() > fiveMinutesAgo;
 }
 
+// Helper: Check if session is a warmup/internal agent session
+function isWarmupSession(entries) {
+  const firstUserEntry = entries.find(e => e.type === 'user');
+  // Warmup sessions are sidechains with just "Warmup" as the first message
+  if (firstUserEntry?.isSidechain && firstUserEntry?.message?.content === 'Warmup') {
+    return true;
+  }
+  return false;
+}
+
 // Helper: Get session details
 async function getSessionDetails(sessionId) {
   try {
     const projectDirs = await readdir(PROJECTS_DIR);
+
+    // Find all matching files and pick the most recently modified one
+    let bestMatch = null;
+    let bestMtime = 0;
 
     for (const projectDir of projectDirs) {
       const projectPath = join(PROJECTS_DIR, projectDir);
       const filePath = join(projectPath, `${sessionId}.jsonl`);
 
       if (existsSync(filePath)) {
-        const entries = await parseJsonlFile(filePath);
-        const todos = await getTodosForSession(sessionId);
-
-        // Get messages with full content, sorted by timestamp
-        const messages = entries
-          .filter(e => e.type === 'user' || e.type === 'assistant')
-          .map(e => ({
-            type: e.type,
-            timestamp: e.timestamp,
-            content: e.message?.content,
-            model: e.message?.model
-          }))
-          .sort((a, b) => {
-            const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-            const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-            return timeA - timeB; // Oldest first, so slice(-10) gets most recent
-          });
-
-        return {
-          id: sessionId,
-          project: projectDir,
-          messages,
-          todos,
-          ...getSessionInfo(entries)
-        };
+        const fileStat = await stat(filePath);
+        if (fileStat.mtime.getTime() > bestMtime) {
+          bestMtime = fileStat.mtime.getTime();
+          bestMatch = { filePath, projectDir };
+        }
       }
     }
+
+    if (!bestMatch) return null;
+
+    const entries = await parseJsonlFile(bestMatch.filePath);
+    const todos = await getTodosForSession(sessionId);
+
+    // Get messages with full content
+    // JSONL entries are already in chronological order, so use index as fallback
+    const allMessages = entries
+      .map((e, idx) => ({ ...e, _index: idx }))
+      .filter(e => e.type === 'user' || e.type === 'assistant')
+      .map(e => ({
+        type: e.type,
+        timestamp: e.timestamp,
+        content: e.message?.content,
+        model: e.message?.model,
+        _index: e._index
+      }));
+
+    // Get last 10 messages (most recent), sorted newest first for display
+    const messages = allMessages
+      .slice(-10)
+      .reverse();
+
+    return {
+      id: sessionId,
+      project: bestMatch.projectDir,
+      messages,
+      todos,
+      ...getSessionInfo(entries)
+    };
   } catch (error) {
     console.error('Error getting session details:', error);
   }
