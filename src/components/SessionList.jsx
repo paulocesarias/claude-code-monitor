@@ -1,4 +1,8 @@
+import { useState } from 'react';
+
 function SessionList({ sessions, selectedId, onSelect }) {
+  const [filter, setFilter] = useState('active'); // 'active', 'recent', 'all'
+
   const formatTime = (timestamp) => {
     if (!timestamp) return 'Unknown';
     const date = new Date(timestamp);
@@ -8,12 +12,12 @@ function SessionList({ sessions, selectedId, onSelect }) {
     if (diff < 60000) return 'Just now';
     if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
     if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    if (diff < 7 * 86400000) return `${Math.floor(diff / 86400000)}d ago`;
     return date.toLocaleDateString();
   };
 
   const getProjectName = (project) => {
     if (!project) return 'Unknown';
-    // Convert path to readable name
     return project
       .replace(/^-/, '')
       .replace(/-/g, '/')
@@ -28,21 +32,93 @@ function SessionList({ sessions, selectedId, onSelect }) {
     return { completed, inProgress, total: todos.length };
   };
 
+  // Filter and sort sessions
+  const getFilteredSessions = () => {
+    let filtered = [...sessions];
+
+    // Sort by lastActivity descending (most recent first)
+    filtered.sort((a, b) => {
+      const timeA = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+      const timeB = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+      return timeB - timeA;
+    });
+
+    switch (filter) {
+      case 'active':
+        return filtered.filter(s => s.isActive);
+      case 'recent':
+        // Last 24 hours
+        const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        return filtered.filter(s => {
+          const time = s.lastActivity ? new Date(s.lastActivity).getTime() : 0;
+          return time > dayAgo;
+        });
+      default:
+        return filtered.slice(0, 100); // Limit to 100 for performance
+    }
+  };
+
+  const filteredSessions = getFilteredSessions();
+  const activeSessions = sessions.filter(s => s.isActive);
+
   return (
     <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+      {/* Header with filter tabs */}
       <div className="px-4 py-3 border-b border-slate-700">
-        <h2 className="text-lg font-semibold text-white">Sessions</h2>
-        <p className="text-sm text-slate-400">{sessions.length} total</p>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-semibold text-white">Sessions</h2>
+          {activeSessions.length > 0 && (
+            <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-xs font-medium rounded-full flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+              {activeSessions.length} active
+            </span>
+          )}
+        </div>
+
+        {/* Filter tabs */}
+        <div className="flex gap-1 bg-slate-900 rounded-lg p-1">
+          <button
+            onClick={() => setFilter('active')}
+            className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              filter === 'active'
+                ? 'bg-green-500/20 text-green-400'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Active ({activeSessions.length})
+          </button>
+          <button
+            onClick={() => setFilter('recent')}
+            className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              filter === 'recent'
+                ? 'bg-blue-500/20 text-blue-400'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            24h
+          </button>
+          <button
+            onClick={() => setFilter('all')}
+            className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              filter === 'all'
+                ? 'bg-slate-600 text-white'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            All
+          </button>
+        </div>
       </div>
 
       <div className="divide-y divide-slate-700 max-h-[600px] overflow-y-auto scrollbar-thin">
-        {sessions.length === 0 ? (
+        {filteredSessions.length === 0 ? (
           <div className="p-8 text-center text-slate-500">
-            No sessions found
+            {filter === 'active' ? 'No active sessions' : 'No sessions found'}
           </div>
         ) : (
-          sessions.map((session) => {
+          filteredSessions.map((session) => {
             const todoProgress = getTodoProgress(session.todos);
+            const currentTask = session.todos?.find(t => t.status === 'in_progress');
 
             return (
               <button
@@ -50,7 +126,7 @@ function SessionList({ sessions, selectedId, onSelect }) {
                 onClick={() => onSelect(session.id)}
                 className={`w-full text-left p-4 hover:bg-slate-700/50 transition-colors ${
                   selectedId === session.id ? 'bg-slate-700' : ''
-                }`}
+                } ${session.isActive ? 'border-l-2 border-l-green-500' : ''}`}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
@@ -62,9 +138,20 @@ function SessionList({ sessions, selectedId, onSelect }) {
                         {getProjectName(session.project)}
                       </span>
                     </div>
-                    <p className="text-xs text-slate-400 truncate mb-2">
-                      {session.summary}
-                    </p>
+
+                    {/* Show current task if active */}
+                    {session.isActive && currentTask ? (
+                      <p className="text-xs text-orange-400 truncate mb-2 flex items-center gap-1">
+                        <svg className="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        {currentTask.activeForm}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-slate-400 truncate mb-2">
+                        {session.summary}
+                      </p>
+                    )}
 
                     {/* Todo Progress */}
                     {todoProgress && (
