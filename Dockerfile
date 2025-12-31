@@ -1,5 +1,8 @@
 FROM node:20-alpine
 
+# Install curl for healthcheck
+RUN apk add --no-cache curl
+
 WORKDIR /app
 
 # Copy package files
@@ -20,6 +23,7 @@ EXPOSE 3001
 # Set environment
 ENV NODE_ENV=production
 ENV PORT=3001
+ENV HOME=/home/paulo
 
 # Start server
 CMD ["node", "server/index.js"]

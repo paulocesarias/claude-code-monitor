@@ -57,6 +57,11 @@ const requireAuth = (req, res, next) => {
   }
 };
 
+// Health check endpoint (no auth required)
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // Auth routes
 app.post('/api/auth/google', async (req, res) => {
   const { credential } = req.body;
