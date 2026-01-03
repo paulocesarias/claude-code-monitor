@@ -29,7 +29,7 @@ const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // CORS setup
 const allowedOrigins = process.env.NODE_ENV === 'production'
-  ? ['https://claude.headbangtech.cloud', 'http://claude.headbangtech.cloud']
+  ? ['https://claude.headbangtech.com', 'http://claude.headbangtech.com']
   : ['http://localhost:5173', 'http://localhost:3000'];
 
 app.use(cors({
