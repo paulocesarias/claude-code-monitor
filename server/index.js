@@ -17,9 +17,50 @@ const httpServer = createServer(app);
 
 // Configuration
 const PORT = process.env.PORT || 3001;
+
+// Multi-user support: MONITORED_USERS is a comma-separated list of usernames
+// Each user's .claude directory will be monitored
+const MONITORED_USERS = (process.env.MONITORED_USERS || '').split(',').filter(Boolean);
+const BASE_HOME_DIR = process.env.BASE_HOME_DIR || '/home';
+
+// Build list of directories to monitor
+const getUserClaudeDir = (username) => join(BASE_HOME_DIR, username, '.claude');
+const getUserProjectsDir = (username) => join(getUserClaudeDir(username), 'projects');
+const getUserTodosDir = (username) => join(getUserClaudeDir(username), 'todos');
+
+// For backwards compatibility, if no MONITORED_USERS specified, use HOME
 const CLAUDE_DIR = process.env.CLAUDE_DIR || join(process.env.HOME, '.claude');
 const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
 const TODOS_DIR = join(CLAUDE_DIR, 'todos');
+
+// Get all projects directories (multi-user or single)
+function getAllProjectsDirs() {
+  if (MONITORED_USERS.length > 0) {
+    return MONITORED_USERS.map(user => ({
+      user,
+      projectsDir: getUserProjectsDir(user),
+      todosDir: getUserTodosDir(user)
+    }));
+  }
+  return [{ user: 'default', projectsDir: PROJECTS_DIR, todosDir: TODOS_DIR }];
+}
+
+// Get all directories to watch
+function getWatchDirs() {
+  const dirs = [];
+  if (MONITORED_USERS.length > 0) {
+    MONITORED_USERS.forEach(user => {
+      const projectsDir = getUserProjectsDir(user);
+      const todosDir = getUserTodosDir(user);
+      if (existsSync(projectsDir)) dirs.push(projectsDir);
+      if (existsSync(todosDir)) dirs.push(todosDir);
+    });
+  } else {
+    if (existsSync(PROJECTS_DIR)) dirs.push(PROJECTS_DIR);
+    if (existsSync(TODOS_DIR)) dirs.push(TODOS_DIR);
+  }
+  return dirs;
+}
 
 // Auth configuration
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
@@ -213,73 +254,86 @@ function getSessionInfo(entries) {
   };
 }
 
-// Helper: Get todos for a session
-async function getTodosForSession(sessionId) {
-  try {
-    const files = await readdir(TODOS_DIR);
-    const todoFile = files.find(f => f.startsWith(sessionId));
-    if (todoFile) {
-      const content = await readFile(join(TODOS_DIR, todoFile), 'utf-8');
-      return JSON.parse(content);
+// Helper: Get todos for a session (searches all user directories)
+async function getTodosForSession(sessionId, userTodosDir = null) {
+  const dirsToSearch = userTodosDir
+    ? [{ todosDir: userTodosDir }]
+    : getAllProjectsDirs();
+
+  for (const { todosDir } of dirsToSearch) {
+    try {
+      if (!existsSync(todosDir)) continue;
+      const files = await readdir(todosDir);
+      const todoFile = files.find(f => f.startsWith(sessionId));
+      if (todoFile) {
+        const content = await readFile(join(todosDir, todoFile), 'utf-8');
+        return JSON.parse(content);
+      }
+    } catch {
+      // No todos found in this directory
     }
-  } catch {
-    // No todos found
   }
   return [];
 }
 
-// Helper: Get all sessions
+// Helper: Get all sessions (from all monitored users)
 async function getAllSessions() {
   const sessionsMap = new Map(); // Use Map to deduplicate by session ID
+  const userDirs = getAllProjectsDirs();
 
-  try {
-    const projectDirs = await readdir(PROJECTS_DIR);
+  for (const { user, projectsDir, todosDir } of userDirs) {
+    try {
+      if (!existsSync(projectsDir)) continue;
 
-    for (const projectDir of projectDirs) {
-      const projectPath = join(PROJECTS_DIR, projectDir);
-      const projectStat = await stat(projectPath);
+      const projectDirs = await readdir(projectsDir);
 
-      if (!projectStat.isDirectory()) continue;
+      for (const projectDir of projectDirs) {
+        const projectPath = join(projectsDir, projectDir);
+        const projectStat = await stat(projectPath);
 
-      const files = await readdir(projectPath);
-      const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
+        if (!projectStat.isDirectory()) continue;
 
-      for (const file of jsonlFiles) {
-        const sessionId = file.replace('.jsonl', '');
-        const filePath = join(projectPath, file);
-        const fileStat = await stat(filePath);
+        const files = await readdir(projectPath);
+        const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
 
-        // Skip empty files
-        if (fileStat.size === 0) continue;
+        for (const file of jsonlFiles) {
+          const sessionId = file.replace('.jsonl', '');
+          const filePath = join(projectPath, file);
+          const fileStat = await stat(filePath);
 
-        // Use file modification time for deduplication (faster than parsing)
-        const existingSession = sessionsMap.get(sessionId);
-        if (existingSession && existingSession.mtime >= fileStat.mtime) {
-          continue; // Skip if we already have a newer version
+          // Skip empty files
+          if (fileStat.size === 0) continue;
+
+          // Use file modification time for deduplication (faster than parsing)
+          const existingSession = sessionsMap.get(sessionId);
+          if (existingSession && existingSession.mtime >= fileStat.mtime) {
+            continue; // Skip if we already have a newer version
+          }
+
+          const entries = await parseJsonlFile(filePath);
+          if (entries.length === 0) continue;
+
+          // Skip warmup/internal agent sessions
+          if (isWarmupSession(entries)) continue;
+
+          const sessionInfo = getSessionInfo(entries);
+          const todos = await getTodosForSession(sessionId, todosDir);
+
+          sessionsMap.set(sessionId, {
+            id: sessionId,
+            user, // Include which user this session belongs to
+            project: projectDir,
+            filePath, // Store for getSessionDetails
+            mtime: fileStat.mtime,
+            ...sessionInfo,
+            todos,
+            isActive: isSessionActive(sessionInfo.lastActivity)
+          });
         }
-
-        const entries = await parseJsonlFile(filePath);
-        if (entries.length === 0) continue;
-
-        // Skip warmup/internal agent sessions
-        if (isWarmupSession(entries)) continue;
-
-        const sessionInfo = getSessionInfo(entries);
-        const todos = await getTodosForSession(sessionId);
-
-        sessionsMap.set(sessionId, {
-          id: sessionId,
-          project: projectDir,
-          filePath, // Store for getSessionDetails
-          mtime: fileStat.mtime,
-          ...sessionInfo,
-          todos,
-          isActive: isSessionActive(sessionInfo.lastActivity)
-        });
       }
+    } catch (error) {
+      console.error(`Error getting sessions for user ${user}:`, error);
     }
-  } catch (error) {
-    console.error('Error getting sessions:', error);
   }
 
   // Convert map to array and sort by last activity (most recent first)
@@ -306,32 +360,42 @@ function isWarmupSession(entries) {
   return false;
 }
 
-// Helper: Get session details
+// Helper: Get session details (searches all user directories)
 async function getSessionDetails(sessionId) {
-  try {
-    const projectDirs = await readdir(PROJECTS_DIR);
+  const userDirs = getAllProjectsDirs();
 
-    // Find all matching files and pick the most recently modified one
-    let bestMatch = null;
-    let bestMtime = 0;
+  // Find all matching files and pick the most recently modified one
+  let bestMatch = null;
+  let bestMtime = 0;
 
-    for (const projectDir of projectDirs) {
-      const projectPath = join(PROJECTS_DIR, projectDir);
-      const filePath = join(projectPath, `${sessionId}.jsonl`);
+  for (const { user, projectsDir, todosDir } of userDirs) {
+    try {
+      if (!existsSync(projectsDir)) continue;
 
-      if (existsSync(filePath)) {
-        const fileStat = await stat(filePath);
-        if (fileStat.mtime.getTime() > bestMtime) {
-          bestMtime = fileStat.mtime.getTime();
-          bestMatch = { filePath, projectDir };
+      const projectDirs = await readdir(projectsDir);
+
+      for (const projectDir of projectDirs) {
+        const projectPath = join(projectsDir, projectDir);
+        const filePath = join(projectPath, `${sessionId}.jsonl`);
+
+        if (existsSync(filePath)) {
+          const fileStat = await stat(filePath);
+          if (fileStat.mtime.getTime() > bestMtime) {
+            bestMtime = fileStat.mtime.getTime();
+            bestMatch = { filePath, projectDir, user, todosDir };
+          }
         }
       }
+    } catch (error) {
+      console.error(`Error searching sessions for user ${user}:`, error);
     }
+  }
 
-    if (!bestMatch) return null;
+  if (!bestMatch) return null;
 
+  try {
     const entries = await parseJsonlFile(bestMatch.filePath);
-    const todos = await getTodosForSession(sessionId);
+    const todos = await getTodosForSession(sessionId, bestMatch.todosDir);
 
     // Get messages with full content
     // JSONL entries are already in chronological order, so use index as fallback
@@ -353,6 +417,7 @@ async function getSessionDetails(sessionId) {
 
     return {
       id: sessionId,
+      user: bestMatch.user,
       project: bestMatch.projectDir,
       messages,
       todos,
@@ -424,7 +489,10 @@ io.on('connection', (socket) => {
 });
 
 // File watcher for real-time updates
-const watcher = watch([PROJECTS_DIR, TODOS_DIR], {
+const watchDirs = getWatchDirs();
+console.log('Watch directories:', watchDirs);
+
+const watcher = watch(watchDirs.length > 0 ? watchDirs : [PROJECTS_DIR, TODOS_DIR], {
   persistent: true,
   ignoreInitial: true,
   depth: 2
@@ -435,7 +503,8 @@ watcher.on('change', async (path) => {
 
   // Emit update to all connected clients
   try {
-    if (path.includes(TODOS_DIR)) {
+    // Check if this is a todos directory (works for any user)
+    if (path.includes('/todos/')) {
       // Todo file changed
       const sessionId = path.split('/').pop().split('-agent-')[0];
       const todos = await getTodosForSession(sessionId);
@@ -472,8 +541,13 @@ watcher.on('add', async () => {
 // Start server
 httpServer.listen(PORT, () => {
   console.log(`Claude Code Monitor server running on port ${PORT}`);
-  console.log(`Watching: ${PROJECTS_DIR}`);
-  console.log(`Watching: ${TODOS_DIR}`);
+  if (MONITORED_USERS.length > 0) {
+    console.log(`Monitored users: ${MONITORED_USERS.join(', ')}`);
+    console.log(`Watching directories: ${watchDirs.join(', ')}`);
+  } else {
+    console.log(`Watching: ${PROJECTS_DIR}`);
+    console.log(`Watching: ${TODOS_DIR}`);
+  }
   console.log(`Google Auth: ${GOOGLE_CLIENT_ID ? 'Configured' : 'NOT CONFIGURED'}`);
   console.log(`Allowed emails: ${ALLOWED_EMAILS.length > 0 ? ALLOWED_EMAILS.join(', ') : 'All (no restriction)'}`);
 });
