@@ -498,9 +498,52 @@ const watcher = watch(watchDirs.length > 0 ? watchDirs : [PROJECTS_DIR, TODOS_DI
   depth: 2
 });
 
-watcher.on('change', async (path) => {
-  console.log('File changed:', path);
+// Debounce mechanism for stats updates to prevent overwhelming the system
+let statsUpdateTimeout = null;
+const STATS_DEBOUNCE_MS = 2000; // Wait 2 seconds after last change before updating stats
 
+async function emitDebouncedStats() {
+  if (statsUpdateTimeout) {
+    clearTimeout(statsUpdateTimeout);
+  }
+  statsUpdateTimeout = setTimeout(async () => {
+    try {
+      const sessions = await getAllSessions();
+      const stats = {
+        totalSessions: sessions.length,
+        activeSessions: sessions.filter(s => s.isActive).length,
+        totalToolCalls: sessions.reduce((sum, s) => sum + s.toolCallCount, 0),
+        totalMessages: sessions.reduce((sum, s) => sum + s.messageCount, 0)
+      };
+      io.emit('stats-updated', stats);
+    } catch (error) {
+      console.error('Error emitting stats:', error);
+    }
+  }, STATS_DEBOUNCE_MS);
+}
+
+// Track pending session updates to debounce rapid changes to the same session
+const pendingSessionUpdates = new Map();
+const SESSION_DEBOUNCE_MS = 500; // Wait 500ms after last change to a session
+
+async function emitDebouncedSessionUpdate(sessionId) {
+  if (pendingSessionUpdates.has(sessionId)) {
+    clearTimeout(pendingSessionUpdates.get(sessionId));
+  }
+  pendingSessionUpdates.set(sessionId, setTimeout(async () => {
+    pendingSessionUpdates.delete(sessionId);
+    try {
+      const session = await getSessionDetails(sessionId);
+      if (session) {
+        io.emit('session-updated', session);
+      }
+    } catch (error) {
+      console.error('Error emitting session update:', error);
+    }
+  }, SESSION_DEBOUNCE_MS));
+}
+
+watcher.on('change', async (path) => {
   // Emit update to all connected clients
   try {
     // Check if this is a todos directory (works for any user)
@@ -510,32 +553,21 @@ watcher.on('change', async (path) => {
       const todos = await getTodosForSession(sessionId);
       io.emit('todos-updated', { sessionId, todos });
     } else if (path.endsWith('.jsonl')) {
-      // Session file changed
+      // Session file changed - debounce updates
       const sessionId = path.split('/').pop().replace('.jsonl', '');
-      const session = await getSessionDetails(sessionId);
-      if (session) {
-        io.emit('session-updated', session);
-      }
+      emitDebouncedSessionUpdate(sessionId);
     }
 
-    // Also emit stats update
-    const sessions = await getAllSessions();
-    const stats = {
-      totalSessions: sessions.length,
-      activeSessions: sessions.filter(s => s.isActive).length,
-      totalToolCalls: sessions.reduce((sum, s) => sum + s.toolCallCount, 0),
-      totalMessages: sessions.reduce((sum, s) => sum + s.messageCount, 0)
-    };
-    io.emit('stats-updated', stats);
+    // Debounce stats updates
+    emitDebouncedStats();
   } catch (error) {
     console.error('Error processing file change:', error);
   }
 });
 
 watcher.on('add', async () => {
-  // New session created
-  const sessions = await getAllSessions();
-  io.emit('sessions-list-updated', sessions);
+  // New session created - debounce to avoid overwhelming on startup or batch creates
+  emitDebouncedStats();
 });
 
 // Start server
