@@ -14,6 +14,10 @@ RUN npm install
 # Copy source code
 COPY . .
 
+# Build argument for Vite (frontend build)
+ARG VITE_GOOGLE_CLIENT_ID
+ENV VITE_GOOGLE_CLIENT_ID=$VITE_GOOGLE_CLIENT_ID
+
 # Build frontend
 RUN npm run build
 
